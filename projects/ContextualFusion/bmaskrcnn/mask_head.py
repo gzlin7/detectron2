@@ -1,58 +1,35 @@
-# Copyright (c) wondervictor. All Rights Reserved
+# Copyright (c) Facebook, Inc. and its affiliates.
 from typing import List
 import fvcore.nn.weight_init as weight_init
 import torch
 from torch import nn
 from torch.nn import functional as F
 
+from detectron2.config import configurable
 from detectron2.layers import Conv2d, ConvTranspose2d, ShapeSpec, cat, get_norm
 from detectron2.structures import Instances
 from detectron2.utils.events import get_event_storage
+from detectron2.utils.registry import Registry
 
-from detectron2.modeling.roi_heads import ROI_MASK_HEAD_REGISTRY
-from detectron2.modeling.roi_heads.mask_head import mask_rcnn_inference
-
-
-def dice_loss_func(input, target):
-    smooth = 1.
-    n = input.size(0)
-    iflat = input.view(n, -1)
-    tflat = target.view(n, -1)
-    intersection = (iflat * tflat).sum(1)
-    loss = 1 - ((2. * intersection + smooth) /
-                (iflat.sum(1) + tflat.sum(1) + smooth))
-    return loss.mean()
+__all__ = [
+    "BaseMaskRCNNHead",
+    "MaskRCNNConvUpsampleHead",
+    "build_mask_head",
+    "ROI_MASK_HEAD_REGISTRY",
+]
 
 
-def boundary_loss_func(boundary_logits, gtmasks):
-    """
-    Args:
-        boundary_logits (Tensor): A tensor of shape (B, H, W) or (B, H, W)
-        gtmasks (Tensor): A tensor of shape (B, H, W) or (B, H, W)
-    """
-    laplacian_kernel = torch.tensor(
-        [-1, -1, -1, -1, 8, -1, -1, -1, -1],
-        dtype=torch.float32, device=boundary_logits.device).reshape(1, 1, 3, 3).requires_grad_(False)
-    boundary_logits = boundary_logits.unsqueeze(1)
-    boundary_targets = F.conv2d(gtmasks.unsqueeze(1), laplacian_kernel, padding=1)
-    boundary_targets = boundary_targets.clamp(min=0)
-    boundary_targets[boundary_targets > 0.1] = 1
-    boundary_targets[boundary_targets <= 0.1] = 0
+ROI_MASK_HEAD_REGISTRY = Registry("ROI_MASK_HEAD")
+ROI_MASK_HEAD_REGISTRY.__doc__ = """
+Registry for mask heads, which predicts instance masks given
+per-region features.
 
-    if boundary_logits.shape[-1] != boundary_targets.shape[-1]:
-        boundary_targets = F.interpolate(
-            boundary_targets, boundary_logits.shape[2:], mode='nearest')
-
-    bce_loss = F.binary_cross_entropy_with_logits(boundary_logits, boundary_targets)
-    dice_loss = dice_loss_func(torch.sigmoid(boundary_logits), boundary_targets)
-    return bce_loss + dice_loss
+The registered object will be called with `obj(cfg, input_shape)`.
+"""
 
 
-def boundary_preserving_mask_loss(
-        pred_mask_logits,
-        pred_boundary_logits,
-        instances,
-        vis_period=0):
+@torch.jit.unused
+def mask_rcnn_loss(pred_mask_logits: torch.Tensor, instances: List[Instances], vis_period: int = 0):
     """
     Compute the mask prediction loss defined in the Mask R-CNN paper.
 
@@ -91,18 +68,16 @@ def boundary_preserving_mask_loss(
         gt_masks.append(gt_masks_per_image)
 
     if len(gt_masks) == 0:
-        return pred_mask_logits.sum() * 0, pred_boundary_logits.sum() * 0
+        return pred_mask_logits.sum() * 0
 
     gt_masks = cat(gt_masks, dim=0)
 
     if cls_agnostic_mask:
         pred_mask_logits = pred_mask_logits[:, 0]
-        pred_boundary_logits = pred_boundary_logits[:, 0]
     else:
         indices = torch.arange(total_num_masks)
         gt_classes = cat(gt_classes, dim=0)
         pred_mask_logits = pred_mask_logits[indices, gt_classes]
-        pred_boundary_logits = pred_boundary_logits[indices, gt_classes]
 
     if gt_masks.dtype == torch.bool:
         gt_masks_bool = gt_masks
@@ -133,15 +108,104 @@ def boundary_preserving_mask_loss(
             storage.put_image(name + f" ({idx})", vis_mask)
 
     mask_loss = F.binary_cross_entropy_with_logits(pred_mask_logits, gt_masks, reduction="mean")
-    boundary_loss = boundary_loss_func(pred_boundary_logits, gt_masks)
-    return mask_loss, boundary_loss
+    return mask_loss
+
+
+def mask_rcnn_inference(pred_mask_logits: torch.Tensor, pred_instances: List[Instances]):
+    """
+    Convert pred_mask_logits to estimated foreground probability masks while also
+    extracting only the masks for the predicted classes in pred_instances. For each
+    predicted box, the mask of the same class is attached to the instance by adding a
+    new "pred_masks" field to pred_instances.
+
+    Args:
+        pred_mask_logits (Tensor): A tensor of shape (B, C, Hmask, Wmask) or (B, 1, Hmask, Wmask)
+            for class-specific or class-agnostic, where B is the total number of predicted masks
+            in all images, C is the number of foreground classes, and Hmask, Wmask are the height
+            and width of the mask predictions. The values are logits.
+        pred_instances (list[Instances]): A list of N Instances, where N is the number of images
+            in the batch. Each Instances must have field "pred_classes".
+
+    Returns:
+        None. pred_instances will contain an extra "pred_masks" field storing a mask of size (Hmask,
+            Wmask) for predicted class. Note that the masks are returned as a soft (non-quantized)
+            masks the resolution predicted by the network; post-processing steps, such as resizing
+            the predicted masks to the original image resolution and/or binarizing them, is left
+            to the caller.
+    """
+    cls_agnostic_mask = pred_mask_logits.size(1) == 1
+
+    if cls_agnostic_mask:
+        mask_probs_pred = pred_mask_logits.sigmoid()
+    else:
+        # Select masks corresponding to the predicted classes
+        num_masks = pred_mask_logits.shape[0]
+        class_pred = cat([i.pred_classes for i in pred_instances])
+        indices = torch.arange(num_masks, device=class_pred.device)
+        mask_probs_pred = pred_mask_logits[indices, class_pred][:, None].sigmoid()
+    # mask_probs_pred.shape: (B, 1, Hmask, Wmask)
+
+    num_boxes_per_image = [len(i) for i in pred_instances]
+    mask_probs_pred = mask_probs_pred.split(num_boxes_per_image, dim=0)
+
+    for prob, instances in zip(mask_probs_pred, pred_instances):
+        instances.pred_masks = prob  # (1, Hmask, Wmask)
+
+
+class BaseMaskRCNNHead(nn.Module):
+    """
+    Implement the basic Mask R-CNN losses and inference logic described in :paper:`Mask R-CNN`
+    """
+
+    @configurable
+    def __init__(self, *, loss_weight: float = 1.0, vis_period: int = 0):
+        """
+        NOTE: this interface is experimental.
+
+        Args:
+            loss_weight (float): multiplier of the loss
+            vis_period (int): visualization period
+        """
+        super().__init__()
+        self.vis_period = vis_period
+        self.loss_weight = loss_weight
+
+    @classmethod
+    def from_config(cls, cfg, input_shape):
+        return {"vis_period": cfg.VIS_PERIOD}
+
+    def forward(self, x, instances: List[Instances]):
+        """
+        Args:
+            x: input region feature(s) provided by :class:`ROIHeads`.
+            instances (list[Instances]): contains the boxes & labels corresponding
+                to the input features.
+                Exact format is up to its caller to decide.
+                Typically, this is the foreground instances in training, with
+                "proposal_boxes" field and other gt annotations.
+                In inference, it contains boxes that are already predicted.
+
+        Returns:
+            A dict of losses in training. The predicted "instances" in inference.
+        """
+        x = self.layers(x)
+        if self.training:
+            return {"loss_mask": mask_rcnn_loss(x, instances, self.vis_period) * self.loss_weight}
+        else:
+            mask_rcnn_inference(x, instances)
+            return instances
+
+    def layers(self, x):
+        """
+        Neural network layers that makes predictions from input features.
+        """
+        raise NotImplementedError
 
 
 @ROI_MASK_HEAD_REGISTRY.register()
-class BoundaryPreservingHead(nn.Module):
-
+class ContextualFusionHead(nn.Module):
     def __init__(self, cfg, input_shape: ShapeSpec):
-        super(BoundaryPreservingHead, self).__init__()
+        super(ContextualFusionHead, self).__init__()
 
         conv_dim = cfg.MODEL.ROI_MASK_HEAD.CONV_DIM
         num_conv = cfg.MODEL.ROI_MASK_HEAD.NUM_CONV
@@ -245,29 +309,115 @@ class BoundaryPreservingHead(nn.Module):
         if self.boundary_predictor.bias is not None:
             nn.init.constant_(self.boundary_predictor.bias, 0)
 
-    def forward(self, mask_features, boundary_features, instances: List[Instances]):
+    def forward(self, mask_features, context_feature, instances: List[Instances]):
         for layer in self.mask_fcns:
             mask_features = layer(mask_features)
         # downsample
-        boundary_features = self.downsample(boundary_features)
+        context_feature = self.downsample(context_feature)
         # mask to boundary fusion
-        boundary_features = boundary_features + self.mask_to_boundary(mask_features)
+        #boundary_features = boundary_features + self.mask_to_boundary(mask_features)
         for layer in self.boundary_fcns:
-            boundary_features = layer(boundary_features)
+            context_feature = layer(context_feature)
         # boundary to mask fusion
-        mask_features = self.boundary_to_mask(boundary_features) + mask_features
+        mask_features = self.boundary_to_mask(context_feature) + mask_features
         mask_features = self.mask_final_fusion(mask_features)
         # mask prediction
         mask_features = F.relu(self.mask_deconv(mask_features))
         mask_logits = self.mask_predictor(mask_features)
         # boundary prediction
-        boundary_features = F.relu(self.boundary_deconv(boundary_features))
-        boundary_logits = self.boundary_predictor(boundary_features)
+        #context_feature = F.relu(self.boundary_deconv(context_feature))
+        #boundary_logits = self.boundary_predictor(boundary_features)
         if self.training:
-            loss_mask, loss_boundary = boundary_preserving_mask_loss(
-                mask_logits, boundary_logits, instances)
-            return {"loss_mask": loss_mask,
-                    "loss_boundary": loss_boundary}
+            return {"loss_mask": mask_rcnn_loss(mask_logits, instances, self.vis_period) * self.loss_weight}
         else:
             mask_rcnn_inference(mask_logits, instances)
             return instances
+
+# To get torchscript support, we make the head a subclass of `nn.Sequential`.
+# Therefore, to add new layers in this head class, please make sure they are
+# added in the order they will be used in forward().
+@ROI_MASK_HEAD_REGISTRY.register()
+class MaskRCNNConvUpsampleHead(BaseMaskRCNNHead, nn.Sequential):
+    """
+    A mask head with several conv layers, plus an upsample layer (with `ConvTranspose2d`).
+    Predictions are made with a final 1x1 conv layer.
+    """
+
+    @configurable
+    def __init__(self, input_shape: ShapeSpec, *, num_classes, conv_dims, conv_norm="", **kwargs):
+        """
+        NOTE: this interface is experimental.
+
+        Args:
+            input_shape (ShapeSpec): shape of the input feature
+            num_classes (int): the number of foreground classes (i.e. background is not
+                included). 1 if using class agnostic prediction.
+            conv_dims (list[int]): a list of N>0 integers representing the output dimensions
+                of N-1 conv layers and the last upsample layer.
+            conv_norm (str or callable): normalization for the conv layers.
+                See :func:`detectron2.layers.get_norm` for supported types.
+        """
+        super().__init__(**kwargs)
+        assert len(conv_dims) >= 1, "conv_dims have to be non-empty!"
+
+        self.conv_norm_relus = []
+
+        cur_channels = input_shape.channels
+        for k, conv_dim in enumerate(conv_dims[:-1]):
+            conv = Conv2d(
+                cur_channels,
+                conv_dim,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+                bias=not conv_norm,
+                norm=get_norm(conv_norm, conv_dim),
+                activation=nn.ReLU(),
+            )
+            self.add_module("mask_fcn{}".format(k + 1), conv)
+            self.conv_norm_relus.append(conv)
+            cur_channels = conv_dim
+
+        self.deconv = ConvTranspose2d(
+            cur_channels, conv_dims[-1], kernel_size=2, stride=2, padding=0
+        )
+        self.add_module("deconv_relu", nn.ReLU())
+        cur_channels = conv_dims[-1]
+
+        self.predictor = Conv2d(cur_channels, num_classes, kernel_size=1, stride=1, padding=0)
+
+        for layer in self.conv_norm_relus + [self.deconv]:
+            weight_init.c2_msra_fill(layer)
+        # use normal distribution initialization for mask prediction layer
+        nn.init.normal_(self.predictor.weight, std=0.001)
+        if self.predictor.bias is not None:
+            nn.init.constant_(self.predictor.bias, 0)
+
+    @classmethod
+    def from_config(cls, cfg, input_shape):
+        ret = super().from_config(cfg, input_shape)
+        conv_dim = cfg.MODEL.ROI_MASK_HEAD.CONV_DIM
+        num_conv = cfg.MODEL.ROI_MASK_HEAD.NUM_CONV
+        ret.update(
+            conv_dims=[conv_dim] * (num_conv + 1),  # +1 for ConvTranspose
+            conv_norm=cfg.MODEL.ROI_MASK_HEAD.NORM,
+            input_shape=input_shape,
+        )
+        if cfg.MODEL.ROI_MASK_HEAD.CLS_AGNOSTIC_MASK:
+            ret["num_classes"] = 1
+        else:
+            ret["num_classes"] = cfg.MODEL.ROI_HEADS.NUM_CLASSES
+        return ret
+
+    def layers(self, x):
+        for layer in self:
+            x = layer(x)
+        return x
+
+
+def build_mask_head(cfg, input_shape):
+    """
+    Build a mask head defined by `cfg.MODEL.ROI_MASK_HEAD.NAME`.
+    """
+    name = cfg.MODEL.ROI_MASK_HEAD.NAME
+    return ROI_MASK_HEAD_REGISTRY.get(name)(cfg, input_shape)
