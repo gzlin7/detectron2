@@ -3,7 +3,7 @@
 from detectron2.config import CfgNode as CN
 
 
-def add_boundary_preserving_config(cfg):
+def add_context_preserving_config(cfg):
 
     cfg.MODEL.CONTEXT_MASK_HEAD = CN()
     cfg.MODEL.CONTEXT_MASK_HEAD.POOLER_RESOLUTION = 28

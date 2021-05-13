@@ -34,15 +34,15 @@ class ContextualFusionROIHeads(StandardROIHeads):
         sampling_ratio    = cfg.MODEL.ROI_MASK_HEAD.POOLER_SAMPLING_RATIO
         pooler_type       = cfg.MODEL.ROI_MASK_HEAD.POOLER_TYPE
         # edge poolers
-        boundary_resolution     = cfg.MODEL.CONTEXT_MASK_HEAD.POOLER_RESOLUTION
-        boundary_in_features    = cfg.MODEL.CONTEXT_MASK_HEAD.IN_FEATURES
-        boundary_scales         = tuple(1.0 / input_shape[k].stride for k in boundary_in_features)
+        context_resolution     = cfg.MODEL.CONTEXT_MASK_HEAD.POOLER_RESOLUTION
+        context_in_features    = cfg.MODEL.CONTEXT_MASK_HEAD.IN_FEATURES
+        context_scales         = tuple(1.0 / input_shape[k].stride for k in context_in_features)
         # fmt: on
 
         in_channels = [input_shape[f].channels for f in in_features][0]
 
         self.mask_in_features = in_features
-        self.boundary_in_features = boundary_in_features
+        self.context_in_features = context_in_features
         # ret = {"mask_in_features": in_features}
         self.mask_pooler= ROIPooler(
             output_size=pooler_resolution,
@@ -50,9 +50,9 @@ class ContextualFusionROIHeads(StandardROIHeads):
             sampling_ratio=sampling_ratio,
             pooler_type=pooler_type,
         )
-        self.boundary_pooler = ROIPooler(
-            output_size=boundary_resolution,
-            scales=boundary_scales,
+        self.context_pooler = ROIPooler(
+            output_size=context_resolution,
+            scales=context_scales,
             sampling_ratio=sampling_ratio,
             pooler_type=pooler_type
         )
@@ -81,17 +81,17 @@ class ContextualFusionROIHeads(StandardROIHeads):
             return {} if self.training else instances
 
         mask_features = [features[f] for f in self.mask_in_features]
-        boundary_features = [features[f] for f in self.boundary_in_features]
+        context_features = [features[f] for f in self.context_in_features]
 
         if self.training:
             # The loss is only defined on positive proposals.
             proposals, _ = select_foreground_proposals(instances, self.num_classes)
             proposal_boxes = [x.proposal_boxes for x in proposals]
             mask_features = self.mask_pooler(mask_features, proposal_boxes)
-            boundary_features = self.boundary_pooler(boundary_features, proposal_boxes)
-            return self.mask_head(mask_features, boundary_features, proposals)
+            context_features = self.context_pooler(context_features, proposal_boxes)
+            return self.mask_head(mask_features, context_features, proposals)
         else:
             pred_boxes = [x.pred_boxes for x in instances]
             mask_features = self.mask_pooler(mask_features, pred_boxes)
-            boundary_features = self.boundary_pooler(boundary_features, pred_boxes)
-            return self.mask_head(mask_features, boundary_features, instances)
+            context_features = self.context_pooler(context_features, pred_boxes)
+            return self.mask_head(mask_features, context_features, instances)

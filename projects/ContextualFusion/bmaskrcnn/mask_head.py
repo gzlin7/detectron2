@@ -171,7 +171,7 @@ class ContextualFusionHead(nn.Module):
                 norm=get_norm(conv_norm, conv_dim),
                 activation=F.relu,
             )
-            self.add_module("boundary_fcn{}".format(k + 1), conv)
+            self.add_module("context_fcn{}".format(k + 1), conv)
             self.context_fcns.append(conv)
             cur_channels = conv_dim
 
@@ -215,7 +215,7 @@ class ContextualFusionHead(nn.Module):
 
         for layer in self.context_fcns:
             context_feature = layer(context_feature)
-        # boundary to mask fusion
+        # context to mask fusion
         mask_features = self.context_to_mask(context_feature) + mask_features
         mask_features = self.mask_final_fusion(mask_features)
         # mask prediction
