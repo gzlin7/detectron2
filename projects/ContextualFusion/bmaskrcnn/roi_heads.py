@@ -34,8 +34,8 @@ class ContextualFusionROIHeads(StandardROIHeads):
         sampling_ratio    = cfg.MODEL.ROI_MASK_HEAD.POOLER_SAMPLING_RATIO
         pooler_type       = cfg.MODEL.ROI_MASK_HEAD.POOLER_TYPE
         # edge poolers
-        boundary_resolution     = cfg.MODEL.BOUNDARY_MASK_HEAD.POOLER_RESOLUTION
-        boundary_in_features    = cfg.MODEL.BOUNDARY_MASK_HEAD.IN_FEATURES
+        boundary_resolution     = cfg.MODEL.CONTEXT_MASK_HEAD.POOLER_RESOLUTION
+        boundary_in_features    = cfg.MODEL.CONTEXT_MASK_HEAD.IN_FEATURES
         boundary_scales         = tuple(1.0 / input_shape[k].stride for k in boundary_in_features)
         # fmt: on
 
