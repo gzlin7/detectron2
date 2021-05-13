@@ -38,7 +38,7 @@ from detectron2.evaluation import (
     verify_results,
 )
 from detectron2.modeling import GeneralizedRCNNWithTTA
-from bmaskrcnn import add_boundary_preserving_config
+from bmaskrcnn import add_context_preserving_config
 
 class Trainer(DefaultTrainer):
     """
@@ -121,7 +121,7 @@ def setup(args):
     Create configs and perform basic setups.
     """
     cfg = get_cfg()
-    add_boundary_preserving_config(cfg)
+    add_context_preserving_config(cfg)
     cfg.merge_from_file(args.config_file)
     cfg.merge_from_list(args.opts)
     cfg.freeze()
