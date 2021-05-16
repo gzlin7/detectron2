@@ -10,6 +10,7 @@ from detectron2.data import MetadataCatalog
 from detectron2.engine import DefaultPredictor
 from detectron2.structures import Instances
 from detectron2.utils.visualizer import Visualizer, VisImage
+from bmaskrcnn import add_context_preserving_config
 
 
 def _get_parsed_args() -> argparse.Namespace:
@@ -44,6 +45,7 @@ if __name__ == "__main__":
     args: argparse.Namespace = _get_parsed_args()
 
     cfg: CfgNode = get_cfg()
+    add_context_preserving_config(cfg)
     cfg.merge_from_file("./configs/bmask_rcnn_R_50_FPN_1x.yaml")
     cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.4
     cfg.MODEL.WEIGHTS = "../../outputs/bmask_rcnn_r50_1x/model_final.pth"
