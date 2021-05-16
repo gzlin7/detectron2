@@ -56,6 +56,7 @@ if __name__ == "__main__":
         img: np.ndarray = cv2.imread(image_file)
 
         output: Instances = predictor(img)["instances"]
+        print(output.keys())
         v = Visualizer(img[:, :, ::-1],
                        MetadataCatalog.get(cfg.DATASETS.TRAIN[0]),
                        scale=1.0)
@@ -67,9 +68,3 @@ if __name__ == "__main__":
         out_file_name += "_processed.png"
 
         cv2.imwrite(out_file_name, result_image)
-
-        sem_seg_output = predictor(img)['sem_seg']
-        sem_seg_vis_output = v.draw_sem_seg(sem_seg_output.argmax(dim=0).to('cpu'))
-        sem_seg_result_image = sem_seg_vis_output.get_image()[:, :, ::-1]
-        out_file_name = re.search(r"(.*)\.", image_file).group(0)[:-1] + '_semseg_processed.png'
-        cv2.imwrite(out_file_name, sem_seg_result_image)
