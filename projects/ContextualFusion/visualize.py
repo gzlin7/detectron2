@@ -48,7 +48,7 @@ if __name__ == "__main__":
     add_context_preserving_config(cfg)
     cfg.merge_from_file("./configs/bmask_rcnn_R_50_FPN_1x.yaml")
     cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.4
-    cfg.MODEL.WEIGHTS = "../../outputs/bmask_rcnn_r50_1x/model_final.pth"
+    cfg.MODEL.WEIGHTS = "../../output_baseline/output/model_final.pth"
     predictor: DefaultPredictor = DefaultPredictor(cfg)
 
     image_file: str
@@ -65,6 +65,6 @@ if __name__ == "__main__":
 
         # get file name without extension, -1 to remove "." at the end
         out_file_name: str = re.search(r"(.*)\.", image_file).group(0)[:-1]
-        out_file_name += "_processed.png"
+        out_file_name += "_processed_baseline.png"
 
         cv2.imwrite(out_file_name, result_image)
