@@ -56,7 +56,7 @@ if __name__ == "__main__":
         img: np.ndarray = cv2.imread(image_file)
 
         output: Instances = predictor(img)["instances"]
-        print(output.keys())
+
         v = Visualizer(img[:, :, ::-1],
                        MetadataCatalog.get(cfg.DATASETS.TRAIN[0]),
                        scale=1.0)
